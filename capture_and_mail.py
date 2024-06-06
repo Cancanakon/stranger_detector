@@ -9,7 +9,7 @@ import cv2
 
 # Bilgisayarın kamerasından fotoğraf çekme
 def capture_image(image_path):
-    cap = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise Exception("Kamera açılamadı!")
 
