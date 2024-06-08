@@ -1,86 +1,95 @@
 import cv2
-import mediapipe as mp
 import numpy as np
 import pickle
-import smtplib
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import mediapipe as mp
+from tensorflow.keras.models import load_model
+from tensorflow.keras.applications.vgg16 import preprocess_input
+import threading
+import time
 import os
-from datetime import datetime
+from playsound import playsound
 
-def send_email(subject, body, to_email, from_email, password, image_path):
-    msg = MIMEMultipart()
-    msg['Subject'] = subject
-    msg['From'] = from_email
-    msg['To'] = to_email
-    msg.attach(MIMEText(body, 'plain'))
+# Load the label encoder
+with open("label_encoder.pkl", "rb") as f:
+    le = pickle.load(f)
 
-    with open(image_path, 'rb') as img_file:
-        img = MIMEImage(img_file.read())
-        img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
-        msg.attach(img)
+# Load the classifier model
+classifier_model = load_model('classifier_model.keras')
 
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(from_email, password)
-        server.send_message(msg)
+# Load the face embedding model
+face_embedding_model = load_model('face_embedding_model.keras')
 
-def get_current_time():
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-def capture_image(image_path):
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise Exception("Kamera açılamadı!")
-    ret, frame = cap.read()
-    if not ret:
-        raise Exception("Kamera görüntüsü alınamadı!")
-    cv2.imwrite(image_path, frame)
-    cap.release()
-
-with open("face_encodings.pkl", "rb") as f:
-    data = pickle.load(f)
-    known_face_encodings = data["encodings"]
-    known_face_names = data["names"]
-
+# Initialize Mediapipe face detection
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
 
-video_capture = cv2.VideoCapture(0)
+# Create directory for strangers if not exists
+os.makedirs("strangers", exist_ok=True)
+
+# Function to handle unknown face detection
+def handle_unknown_face(frame, timestamp):
+    filename = f"strangers/{timestamp}.jpg"
+    cv2.imwrite(filename, frame)
+    print(f"Saved unknown face image: {filename}")
+
+# Function to be called if no known face detected within 15 seconds
+def send_alert():
+    print("No known face detected within 15 seconds.")
+    try:
+        playsound('alert.mp3')
+    except:
+        print("Failed to play sound alert")
+
+# Thread to monitor the detection of known faces
+def monitor_known_faces():
+    global last_unknown_time, known_face_detected
+    while True:
+        if last_unknown_time is not None and not known_face_detected:
+            if time.time() - last_unknown_time > 15:
+                send_alert()
+                break
+        time.sleep(1)
+
+last_unknown_time = None
+known_face_detected = False
+
+video_capture = cv2.VideoCapture(1)  # Default webcam
+
+# Start the monitoring thread
+monitor_thread = threading.Thread(target=monitor_known_faces)
+monitor_thread.start()
 
 while True:
     ret, frame = video_capture.read()
+    if not ret:
+        break
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
 
+    results = face_mesh.process(rgb_frame)
     if results.multi_face_landmarks:
         face_landmarks = results.multi_face_landmarks[0]
-        face_encoding = np.array([[landmark.x, landmark.y, landmark.z] for landmark in face_landmarks.landmark])
 
-        name = "Bilinmeyen"
-        min_distance = float("inf")
-        for known_face_encoding, known_face_name in zip(known_face_encodings, known_face_names):
-            distance = np.linalg.norm(known_face_encoding - face_encoding)
-            if distance < min_distance:
-                min_distance = distance
-                name = known_face_name if distance < 0.6 else "Bilinmeyen"
+        # Resize the face image to the input size of the model
+        face_image = cv2.resize(rgb_frame, (224, 224))
+        face_image = np.expand_dims(face_image, axis=0)
+        face_image = preprocess_input(face_image)
 
-        if name == "Bilinmeyen":
-            image_path = 'captured_image.jpg'
-            capture_image(image_path)
+        # Get face embeddings
+        face_embedding = face_embedding_model.predict(face_image).flatten()
 
-            subject = "Bilinmeyen Ziyaretçi Tespit Edildi"
-            body = f"Bilinmeyen Ziyaretçi. Gönderilme tarihi ve saati: {get_current_time()}"
-            to_email = "xxx@gmail.com"
-            from_email = "xxx@gmail.com"
-            password = os.getenv('EMAIL_PASSWORD')  # Ensure this is set correctly
+        # Predict the face
+        face_embedding_exp = np.expand_dims(face_embedding, axis=0)
+        prediction = classifier_model.predict(face_embedding_exp)
+        pred_label = np.argmax(prediction, axis=1)
+        confidence = np.max(prediction)  # Prediction confidence
+        name = "Unknown"
 
-            try:
-                send_email(subject, body, to_email, from_email, password, image_path)
-            except Exception as e:
-                print(f"E-posta gönderme hatası: {e}")
-
-            os.remove(image_path)
+        # Confidence threshold check
+        if confidence > 0.90:  # Adjusted threshold for better accuracy
+            name = le.inverse_transform(pred_label)[0]
+            known_face_detected = True
+        else:
+            known_face_detected = False
 
         h, w, _ = frame.shape
         cx_min = int(min([landmark.x for landmark in face_landmarks.landmark]) * w)
@@ -91,7 +100,12 @@ while True:
         cv2.rectangle(frame, (cx_min, cy_min), (cx_max, cy_max), (0, 0, 255), 2)
         cv2.rectangle(frame, (cx_min, cy_max - 35), (cx_max, cy_max), (0, 0, 255), cv2.FILLED)
         font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(frame, name, (cx_min + 6, cy_max - 6), font, 1.0, (255, 255, 255), 1)
+        cv2.putText(frame, f"{name} ({confidence:.2f})", (cx_min + 6, cy_max - 6), font, 1.0, (255, 255, 255), 1)
+
+        if name == "Unknown":
+            last_unknown_time = time.time()
+            timestamp = int(time.time())
+            #handle_unknown_face(frame, timestamp)
 
     cv2.imshow('Video', frame)
 
