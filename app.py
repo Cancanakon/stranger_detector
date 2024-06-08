@@ -9,30 +9,23 @@ import time
 import os
 from playsound import playsound
 
-# Load the label encoder
 with open("label_encoder.pkl", "rb") as f:
     le = pickle.load(f)
 
-# Load the classifier model
 classifier_model = load_model('classifier_model.keras')
 
-# Load the face embedding model
 face_embedding_model = load_model('face_embedding_model.keras')
 
-# Initialize Mediapipe face detection
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
 
-# Create directory for strangers if not exists
 os.makedirs("strangers", exist_ok=True)
 
-# Function to handle unknown face detection
 def handle_unknown_face(frame, timestamp):
     filename = f"strangers/{timestamp}.jpg"
     cv2.imwrite(filename, frame)
     print(f"Saved unknown face image: {filename}")
 
-# Function to be called if no known face detected within 15 seconds
 def send_alert():
     print("No known face detected within 15 seconds.")
     try:
@@ -40,7 +33,6 @@ def send_alert():
     except:
         print("Failed to play sound alert")
 
-# Thread to monitor the detection of known faces
 def monitor_known_faces():
     global last_unknown_time, known_face_detected
     while True:
@@ -53,9 +45,8 @@ def monitor_known_faces():
 last_unknown_time = None
 known_face_detected = False
 
-video_capture = cv2.VideoCapture(1)  # Default webcam
+video_capture = cv2.VideoCapture(1)
 
-# Start the monitoring thread
 monitor_thread = threading.Thread(target=monitor_known_faces)
 monitor_thread.start()
 
@@ -69,23 +60,19 @@ while True:
     if results.multi_face_landmarks:
         face_landmarks = results.multi_face_landmarks[0]
 
-        # Resize the face image to the input size of the model
         face_image = cv2.resize(rgb_frame, (224, 224))
         face_image = np.expand_dims(face_image, axis=0)
         face_image = preprocess_input(face_image)
 
-        # Get face embeddings
         face_embedding = face_embedding_model.predict(face_image).flatten()
 
-        # Predict the face
         face_embedding_exp = np.expand_dims(face_embedding, axis=0)
         prediction = classifier_model.predict(face_embedding_exp)
         pred_label = np.argmax(prediction, axis=1)
-        confidence = np.max(prediction)  # Prediction confidence
+        confidence = np.max(prediction)
         name = "Unknown"
 
-        # Confidence threshold check
-        if confidence > 0.90:  # Adjusted threshold for better accuracy
+        if confidence > 0.8:
             name = le.inverse_transform(pred_label)[0]
             known_face_detected = True
         else:

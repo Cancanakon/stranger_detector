@@ -12,18 +12,15 @@ from sklearn.model_selection import train_test_split
 import pickle
 import matplotlib.pyplot as plt
 
-# Yüz algılama ve mesh modeli başlatma
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
 
-# VGG16 modelini yükleme ve embedding modeli oluşturma
 base_model = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
 x = base_model.output
 x = Flatten()(x)
 embedding_layer = Dense(128, name='embedding')(x)
 embedding_model = Model(inputs=base_model.input, outputs=embedding_layer)
 
-# Resimleri ve etiketleri yükleme
 image_folder = "images"
 embeddings = []
 labels = []
@@ -41,17 +38,14 @@ for image_name in os.listdir(image_folder):
         results = face_mesh.process(image_rgb)
 
         if results.multi_face_landmarks:
-            # Yüz görüntüsünü modele uygun boyuta yeniden boyutlandırma
             face_image = cv2.resize(image_rgb, (224, 224))
             face_image = np.expand_dims(face_image, axis=0)
             face_image = preprocess_input(face_image)
 
-            # Yüz embeddings'ini elde etme
             face_embedding = embedding_model.predict(face_image).flatten()
 
             embeddings.append(face_embedding)
 
-            # Etiket olarak dosya adından kişiyi çıkarma
             label = image_name.split('_')[0]
             labels.append(label)
             print(f"Image: {image_name}, Label: {label}")  # Etiketleri kontrol etme
@@ -64,38 +58,31 @@ if len(embeddings) == 0:
 embeddings = np.array(embeddings)
 labels = np.array(labels)
 
-# Etiketleri sayısal değerlere dönüştürme
 le = LabelEncoder()
 labels_enc = le.fit_transform(labels)
 
-# Veriyi eğitim ve test setlerine ayırma
 X_train, X_test, y_train, y_test = train_test_split(embeddings, labels_enc, test_size=0.2, random_state=42)
 
-# Yeni sınıflandırıcı model oluşturma
 input_shape = embeddings.shape[1]
 classifier_input = Input(shape=(input_shape,))
 x = Dense(128, activation='relu')(classifier_input)
-x = Dropout(0.5)(x)  # Dropout ekleyerek overfitting'i önlemeye çalışıyoruz
+x = Dropout(0.5)(x)
 x = Dense(64, activation='relu')(x)
 x = Dropout(0.5)(x)
 x = Dense(32, activation='relu')(x)
 output_layer = Dense(len(le.classes_), activation='softmax')(x)
 classifier_model = Model(inputs=classifier_input, outputs=output_layer)
 
-# Modeli eğitme
 classifier_model.compile(optimizer=Adam(), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
-# Erken durdurma
-early_stopping = EarlyStopping(monitor='val_loss', patience=100, restore_best_weights=True)
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
-# Model eğitimi
 history = classifier_model.fit(X_train, y_train,
-                               epochs=300,
+                               epochs=50,
                                batch_size=32,
                                validation_data=(X_test, y_test),
                                callbacks=[early_stopping])
 
-# Eğitim sürecinin grafiği
 plt.plot(history.history['loss'], label='train_loss')
 plt.plot(history.history['val_loss'], label='val_loss')
 plt.legend()
@@ -106,11 +93,9 @@ plt.plot(history.history['val_accuracy'], label='val_accuracy')
 plt.legend()
 plt.show()
 
-# Modelleri kaydetme
 embedding_model.save('face_embedding_model.keras')
 classifier_model.save('classifier_model.keras')
 
-# Etiketleri kaydetme
 with open('label_encoder.pkl', 'wb') as f:
     pickle.dump(le, f)
 
