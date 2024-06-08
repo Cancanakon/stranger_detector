@@ -1,98 +1,118 @@
+import dlib
 import cv2
-import numpy as np
+import os
 import pickle
-import mediapipe as mp
-from tensorflow.keras.models import load_model
-from tensorflow.keras.applications.vgg16 import preprocess_input
+import numpy as np
 import threading
 import time
-import os
+import smtplib
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from playsound import playsound
 
-with open("label_encoder.pkl", "rb") as f:
-    le = pickle.load(f)
+detector = dlib.get_frontal_face_detector()
+sp = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+facerec = dlib.face_recognition_model_v1("dlib_face_recognition_resnet_model_v1.dat")
 
-classifier_model = load_model('classifier_model.keras')
+known_face_encodings = []
+known_face_names = []
 
-face_embedding_model = load_model('face_embedding_model.keras')
+with open('face_encodings.pkl', 'rb') as f:
+    known_face_encodings, known_face_names = pickle.load(f)
 
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
+EMAIL_ADDRESS = "SENDER_MAIL@gmail.com"
+EMAIL_PASSWORD = "SPECIAL_PASSWORD_SMTP"
+EMAIL_TO = ["RECEIVER_MAIL@gmail.com"]
 
-os.makedirs("strangers", exist_ok=True)
+lock = threading.Lock()
+unknown_counter = 0
+MAX_UNKNOWN_TIME = 5
 
-def handle_unknown_face(frame, timestamp):
-    filename = f"strangers/{timestamp}.jpg"
-    cv2.imwrite(filename, frame)
-    print(f"Saved unknown face image: {filename}")
+def send_warning(image_path):
+    msg = MIMEMultipart()
+    msg['Subject'] = 'UYARI: Odaya yabancı birisi girdi'
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = ", ".join(EMAIL_TO)
 
-def send_alert():
-    print("No known face detected within 15 seconds.")
-    try:
-        playsound('alert.mp3')
-    except:
-        print("Failed to play sound alert")
+    text = MIMEText(f"Odaya yabancı birisi girdi. Saat: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    msg.attach(text)
 
-def monitor_known_faces():
-    global last_unknown_time, known_face_detected
+    with open(image_path, 'rb') as f:
+        img_data = f.read()
+    image = MIMEImage(img_data, name=os.path.basename(image_path))
+    msg.attach(image)
+
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_ADDRESS, EMAIL_TO, msg.as_string())
+
+def unknown_face_timer():
+    global unknown_counter
     while True:
-        if last_unknown_time is not None and not known_face_detected:
-            if time.time() - last_unknown_time > 15:
-                send_alert()
-                break
         time.sleep(1)
+        with lock:
+            if unknown_counter > 0:
+                unknown_counter -= 1
+                if unknown_counter == 0:
+                    timestamp = time.strftime("%Y%m%d-%H%M%S")
+                    image_path = f"unknown_{timestamp}.jpg"
+                    cv2.imwrite(image_path, last_frame)
+                    send_warning(image_path)
+                    playsound("alert.mp3")
 
-last_unknown_time = None
-known_face_detected = False
+timer_thread = threading.Thread(target=unknown_face_timer)
+timer_thread.daemon = True
+timer_thread.start()
+
+def get_face_encodings(image):
+    dets = detector(image)
+    encodings = []
+    for det in dets:
+        shape = sp(image, det)
+        face_encoding = np.array(facerec.compute_face_descriptor(image, shape))
+        encodings.append(face_encoding)
+    return encodings
+
+def compare_faces(known_encodings, face_encoding, tolerance=0.5):
+    distances = np.linalg.norm(known_encodings - face_encoding, axis=1)
+    min_distance = np.min(distances)
+    return min_distance <= tolerance, min_distance
 
 video_capture = cv2.VideoCapture(1)
-
-monitor_thread = threading.Thread(target=monitor_known_faces)
-monitor_thread.start()
+last_frame = None
 
 while True:
     ret, frame = video_capture.read()
-    if not ret:
-        break
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    last_frame = frame.copy()
 
-    results = face_mesh.process(rgb_frame)
-    if results.multi_face_landmarks:
-        face_landmarks = results.multi_face_landmarks[0]
+    face_encodings = get_face_encodings(rgb_frame)
 
-        face_image = cv2.resize(rgb_frame, (224, 224))
-        face_image = np.expand_dims(face_image, axis=0)
-        face_image = preprocess_input(face_image)
+    any_known_face = False
+    for face_encoding in face_encodings:
+        match_found, distance = compare_faces(np.array(known_face_encodings), face_encoding)
 
-        face_embedding = face_embedding_model.predict(face_image).flatten()
-
-        face_embedding_exp = np.expand_dims(face_embedding, axis=0)
-        prediction = classifier_model.predict(face_embedding_exp)
-        pred_label = np.argmax(prediction, axis=1)
-        confidence = np.max(prediction)
-        name = "Unknown"
-
-        if confidence > 0.8:
-            name = le.inverse_transform(pred_label)[0]
-            known_face_detected = True
+        if match_found:
+            matched_idx = np.argmin(np.linalg.norm(np.array(known_face_encodings) - face_encoding, axis=1))
+            name = known_face_names[matched_idx]
+            label = f"{name} ({distance:.2f})"
+            any_known_face = True
         else:
-            known_face_detected = False
+            label = f"Yabancı ({distance:.2f})"
 
-        h, w, _ = frame.shape
-        cx_min = int(min([landmark.x for landmark in face_landmarks.landmark]) * w)
-        cy_min = int(min([landmark.y for landmark in face_landmarks.landmark]) * h)
-        cx_max = int(max([landmark.x for landmark in face_landmarks.landmark]) * w)
-        cy_max = int(max([landmark.y for landmark in face_landmarks.landmark]) * h)
+        for (i, det) in enumerate(detector(rgb_frame)):
+            left, top, right, bottom = (det.left(), det.top(), det.right(), det.bottom())
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-        cv2.rectangle(frame, (cx_min, cy_min), (cx_max, cy_max), (0, 0, 255), 2)
-        cv2.rectangle(frame, (cx_min, cy_max - 35), (cx_max, cy_max), (0, 0, 255), cv2.FILLED)
-        font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(frame, f"{name} ({confidence:.2f})", (cx_min + 6, cy_max - 6), font, 1.0, (255, 255, 255), 1)
-
-        if name == "Unknown":
-            last_unknown_time = time.time()
-            timestamp = int(time.time())
-            #handle_unknown_face(frame, timestamp)
+    if any_known_face:
+        with lock:
+            unknown_counter = 0
+    else:
+        with lock:
+            if unknown_counter == 0:
+                unknown_counter = MAX_UNKNOWN_TIME
 
     cv2.imshow('Video', frame)
 
